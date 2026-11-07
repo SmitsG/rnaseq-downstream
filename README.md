@@ -97,7 +97,7 @@ The pipeline is designed to be run from the **project root directory**.
 
 The main entry point is a single function:
 
-**run_airway_pipeline**
+**run_rnaseq_pipeline**
 
 By default, the pipeline is run as a linear script, which is the most readable and beginner-friendly option:
 source("scripts/run_airway_pipeline.R")
@@ -152,19 +152,26 @@ After a successful run, the following outputs are generated.
 
 ## Using your own data
 
-The pipeline is written to be **generic** and can be adapted to other bulk RNA-seq experiments.
+`run_rnaseq_pipeline()` uses the example `airway` dataset when called without data arguments. The original `run_airway_pipeline()` name remains available for compatibility. To analyze your own data, pass a raw count matrix and sample metadata table:
 
-To use your own data, you will need:
-- a count matrix (genes × samples)
-- a sample metadata table
-- a simple experimental design formula
+```r
+source("R/pipeline_functions.R")
 
-Recommended approach:
-1. Replace the airway dataset loading step
-2. Construct a DESeq2 dataset from your counts and metadata
-3. Reuse the existing pipeline functions
+counts <- as.matrix(read.csv("data/counts.csv", row.names = 1, check.names = FALSE))
+sample_data <- read.csv("data/samples.csv", row.names = 1)
+sample_data$condition <- relevel(factor(sample_data$condition), ref = "control")
 
-This separation is intentional and allows the pipeline to be extended without rewriting core logic.
+out <- run_rnaseq_pipeline(
+  counts = counts,
+  col_data = sample_data,
+  design = ~ condition,
+  group_variable = "condition"
+)
+```
+
+The count matrix must have genes in rows, samples in columns, unique gene IDs as row names, and unique sample IDs as column names. Counts must be raw, finite, non-negative whole numbers; normalized or transformed values are not valid DESeq2 input. The sample metadata must have sample IDs as row names, with names matching the count matrix columns. Set the condition reference level explicitly so the reported fold-change direction is clear. For designs with more than one coefficient, pass `coef` to select the coefficient used for LFC shrinkage.
+
+The current enrichment functions use human Ensembl IDs (`org.Hs.eg.db`) and human KEGG (`hsa`). Use human Ensembl gene IDs for custom data, with version suffixes removed from the count matrix row names. Non-human organisms and other identifier types need a matching annotation database and enrichment configuration before those results are meaningful. The combined PDF report is named with an `RNA-seq_` prefix for custom data and an `Airway_` prefix for the example; other output filenames are shared.
 
 ---
 

@@ -5,7 +5,7 @@ suppressPackageStartupMessages({
 
 source(here::here("R", "pipeline_functions.R"))
 
-out <- run_airway_pipeline(alpha = 0.05, padj_cutoff = 0.05, shrink = TRUE)
+out <- run_rnaseq_pipeline(alpha = 0.05, padj_cutoff = 0.05, shrink = TRUE)
 
 message("Done.")
 message("Results: ", out$dirs$results)

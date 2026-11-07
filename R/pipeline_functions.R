@@ -17,21 +17,70 @@ suppressPackageStartupMessages({
   library(EnhancedVolcano)
 })
 
-run_airway_pipeline <- function(alpha = 0.05,
+run_rnaseq_pipeline <- function(alpha = 0.05,
                                 padj_cutoff = 0.05,
                                 shrink = TRUE,
-                                coef = "dex_trt_vs_untrt") {
+                                coef = NULL,
+                                counts = NULL,
+                                col_data = NULL,
+                                design = ~ dex,
+                                group_variable = NULL) {
   dirs <- init_output_dirs()
   log_path <- file.path(dirs$results, "pipeline.log")
   safe_remove(log_path)
   
-  log_line(log_path, "Starting airway pipeline")
-  
-  data("airway", package = "airway")
-  se <- airway
-  log_line(log_path, "Loaded airway dataset | samples:", ncol(se), "genes:", nrow(se))
-  
-  dds <- DESeq2::DESeqDataSet(se, design = ~ dex)
+  if (is.null(counts) && is.null(col_data)) {
+    data("airway", package = "airway")
+    se <- airway
+    design <- ~ dex
+    col_data <- as.data.frame(SummarizedExperiment::colData(se))
+    counts <- SummarizedExperiment::assay(se)
+    group_variable <- "dex"
+    dataset_name <- "Airway"
+  } else {
+    dataset_name <- "RNA-seq"
+    assert_that(!is.null(counts) && !is.null(col_data),
+                "Provide both counts and col_data, or neither to use the airway example.")
+    assert_that(is.matrix(counts) && is.numeric(counts),
+                "counts must be a numeric matrix with genes in rows and samples in columns.")
+    assert_that(nrow(counts) > 0 && ncol(counts) > 0,
+                "counts must contain at least one gene and one sample.")
+    assert_that(!is.null(rownames(counts)) && !anyDuplicated(rownames(counts)),
+                "counts must have unique gene IDs as row names.")
+    assert_that(!is.null(colnames(counts)) && !anyDuplicated(colnames(counts)),
+                "counts must have unique sample IDs as column names.")
+    assert_that(all(is.finite(counts)) && all(counts >= 0) &&
+                  all(counts == floor(counts)),
+                "counts must contain finite, non-negative whole numbers (raw counts).")
+    assert_that(is.data.frame(col_data) && !is.null(rownames(col_data)),
+                "col_data must be a data.frame with sample IDs as row names.")
+    assert_that(!anyDuplicated(rownames(col_data)),
+                "col_data must have unique sample IDs as row names.")
+    assert_that(setequal(colnames(counts), rownames(col_data)),
+                "Sample IDs in counts columns must match row names in col_data.")
+    col_data <- col_data[colnames(counts), , drop = FALSE]
+    design_variables <- all.vars(design)
+    assert_that(length(design_variables) > 0 &&
+                  all(design_variables %in% colnames(col_data)),
+                "Every variable in design must be a column in col_data.")
+    assert_that(all(vapply(col_data[design_variables], function(x) !anyNA(x), logical(1))),
+                "Design variables in col_data cannot contain missing values.")
+    if (is.null(group_variable)) group_variable <- tail(design_variables, 1)
+    assert_that(group_variable %in% colnames(col_data),
+                "group_variable must name a column in col_data.")
+    col_data[[group_variable]] <- droplevels(factor(col_data[[group_variable]]))
+    assert_that(nlevels(col_data[[group_variable]]) >= 2,
+                "group_variable must have at least two observed groups.")
+  }
+
+  log_line(log_path, "Starting", dataset_name, "pipeline")
+  log_line(log_path, "Loaded dataset | samples:", ncol(counts), "genes:", nrow(counts))
+
+  dds <- DESeq2::DESeqDataSetFromMatrix(
+    countData = round(counts),
+    colData = col_data,
+    design = design
+  )
   dds <- prefilter_dds(dds, min_total = 1)
   dds <- run_deseq2(dds)
   log_line(log_path, "DESeq2 fit complete | genes:", nrow(dds), "samples:", ncol(dds))
@@ -39,6 +88,13 @@ run_airway_pipeline <- function(alpha = 0.05,
   res <- get_deseq_results(dds, alpha = alpha)
   save_csv(as.data.frame(res), file.path(dirs$results, "deseq2_results.csv"))
   
+  if (isTRUE(shrink) && is.null(coef)) {
+    available_coefs <- setdiff(DESeq2::resultsNames(dds), "Intercept")
+    assert_that(length(available_coefs) == 1,
+                paste0("Set coef explicitly for LFC shrinkage. Available coefficients: ",
+                       paste(available_coefs, collapse = ", ")))
+    coef <- available_coefs[[1]]
+  }
   res_shrunk <- if (isTRUE(shrink)) shrink_lfc_safe(dds, coef = coef) else res
   res_shrunk <- res_shrunk[order(res_shrunk$pvalue), ]
   save_csv(as.data.frame(res_shrunk), file.path(dirs$results, "deseq2_results_shrunk.csv"))
@@ -46,9 +102,10 @@ run_airway_pipeline <- function(alpha = 0.05,
   tx <- make_transforms(dds)
   vsd <- tx$vsd
   rld <- tx$rld
-  ann <- as.data.frame(SummarizedExperiment::colData(dds)[, "dex", drop = FALSE])
+  ann <- as.data.frame(SummarizedExperiment::colData(dds)[, group_variable, drop = FALSE])
   
-  pca <- plot_pca(rld, intgroup = "dex", title = "PCA (rlog) - Airway")
+  pca <- plot_pca(rld, intgroup = group_variable,
+                  title = paste("PCA (rlog) -", dataset_name))
   save_gg(pca, file.path(dirs$plots, "PCA_plot.png"))
   
   plot_ma_png(res, file.path(dirs$plots, "MA_plot.png"))
@@ -68,7 +125,7 @@ run_airway_pipeline <- function(alpha = 0.05,
     y = "pvalue",
     pCutoff = 0.05,
     FCcutoff = 1.5,
-    title = "Volcano plot - Airway (shrunk LFC if available)"
+    title = paste("Volcano plot -", dataset_name, "(shrunk LFC if available)")
   )
   save_gg(volcano, file.path(dirs$plots, "Volcano_plot.png"), width = 7, height = 5)
   
@@ -123,7 +180,7 @@ run_airway_pipeline <- function(alpha = 0.05,
   if (!is.null(dot_go_sign)) save_gg(dot_go_sign, file.path(dirs$plots, "GSEA_GO_dotplot_sign.png"), width = 10, height = 6)
   if (!is.null(dot_kegg_sign)) save_gg(dot_kegg_sign, file.path(dirs$plots, "GSEA_KEGG_dotplot_sign.png"), width = 10, height = 6)
   
-  pdf_path <- file.path(dirs$plots, "Airway_DE_Analysis_All_Plots.pdf")
+  pdf_path <- file.path(dirs$plots, paste0(dataset_name, "_DE_Analysis_All_Plots.pdf"))
   write_pdf_report(
     pdf_path,
     ggplots = list(
@@ -133,7 +190,7 @@ run_airway_pipeline <- function(alpha = 0.05,
       dot_go_sign, dot_kegg_sign,
       go_emap, go_cnet
     ),
-    base_plot_fns = list(function() DESeq2::plotMA(res, main = "MA plot - Airway"))
+    base_plot_fns = list(function() DESeq2::plotMA(res, main = paste("MA plot -", dataset_name)))
   )
   
   log_line(log_path, "Saved PDF report:", pdf_path)
@@ -154,3 +211,6 @@ run_airway_pipeline <- function(alpha = 0.05,
     log = log_path
   )
 }
+
+# Retain the original function name for existing airway examples and scripts.
+run_airway_pipeline <- run_rnaseq_pipeline
